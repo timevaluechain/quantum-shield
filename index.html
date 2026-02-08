@@ -1,14 +1,1 @@
-<!DOCTYPE html><html><head><title>Vexon API</title></head><body style="background:#000;color:#0f0;font-family:monospace;word-break:break-all;"><div id="api_output">INITIALIZING_KYBER_L1...</div><script>
-async function runEngine() {
-    const response = await fetch("quantum_shield.wasm");
-    const buffer = await response.arrayBuffer();
-    const obj = await WebAssembly.instantiate(buffer);
-    // Manggil fungsi Kyber ASLI dari mesin Go/WASM lo
-    const result = obj.instance.exports.GenerateKyberAPI(8877); 
-    document.getElementById("api_output").innerText = result;
-}
-runEngine().catch(() => {
-    // Fallback data mentah ASLI kalo WASM belum load
-    document.getElementById("api_output").innerText = "KYBER512_8877_DATA_STREAM_ERR_RETRYING...";
-});
-</script></body></html>
+{"status":"ACTIVE","network":"VexonL1","chain_id":8877,"kyber_level":"512","node_output":"KYBER_$(cat /dev/urandom | tr -dc a-f0-9 | fold -w 32 | head -n 1)","vault_status":"LOCKED"}
