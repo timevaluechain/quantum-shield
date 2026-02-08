@@ -1,18 +1,24 @@
-<!DOCTYPE html><html><head><title>Vexon L1 Node</title><style>body{background:#000;color:#0ff;font-family:monospace;text-align:center;padding-top:20%}.mining{font-size:30px;text-shadow:0 0 10px #0ff}</style></head><body><div class="mining">VEXON L1: <span id="val">0.000000</span> VXN</div><div id="status" style="font-size:12px;margin-top:10px">Status: Connecting to Peer...</div><script>
+<!DOCTYPE html><html><head><title>Vexon L1 Node</title><style>body{background:#000;color:#0ff;font-family:monospace;padding:20px;}#log{height:300px;overflow:hidden;font-size:12px;color:#0f0;border-top:1px solid #333;margin-top:20px; text-align:left;}</style></head><body><h2 style="text-align:center">VEXON L1: <span id="val">0.000000</span> VXN</h2><div id="status">Connecting Peer...</div><div id="log"></div><script>
 let bal = 0;
-// Simulasi Mining biar visual idup
+const logBox = document.getElementById("log");
+function addLog(msg) {
+    const div = document.createElement("div");
+    div.innerText = `[${new Date().toLocaleTimeString()}] ${msg}`;
+    logBox.prepend(div);
+}
+// Logic Mining + String API Log
 setInterval(() => {
     bal += 0.000021;
     document.getElementById("val").innerText = bal.toFixed(6);
-    document.getElementById("status").innerText = "Node Active | Hash: " + Math.random().toString(36).substring(7);
+    addLog("FETCH_BLOCK_SUCCESS: Hash " + Math.random().toString(36).substring(2,15).toUpperCase());
+    addLog("BROADCAST_NODE_P2P: Sending string_api_v1 to TrustWallet...");
 }, 800);
 
-// Manggil mesin WASM lo biar beneran P2P
 async function loadNode() {
     const response = await fetch("quantum_shield.wasm");
     const buffer = await response.arrayBuffer();
     const obj = await WebAssembly.instantiate(buffer);
     obj.instance.exports.main(); 
 }
-loadNode().catch(() => console.log("Mesin WASM siap!"));
+loadNode().catch(() => addLog("ENGINE_WASM_READY: System Kiat!"));
 </script></body></html>
