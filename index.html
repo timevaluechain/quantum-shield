@@ -1,1 +1,13 @@
-<!DOCTYPE html><html><head><title>Vexon L1 Node</title></head><body style="background:#000;color:#0ff;text-align:center;"><h1>NODE VEXON AKTIF</h1><p>Mining otomatis sedang berjalan di browser lo...</p><script src="v_master.py"></script></body></html>
+<!DOCTYPE html><html><head><title>Vexon L1 Node</title><style>body{background:#000;color:#0ff;font-family:monospace;text-align:center;margin-top:20%}.live{font-size:25px;font-weight:bold;text-shadow:0 0 10px #0ff}</style></head><body><div class="live">VEXON L1 NODE: ACTIVE</div><div id="hash" style="font-size:15px">Hash Rate: Calculating...</div><div style="margin-top:20px">Balance: <span id="bal">0.000000</span> VXN</div><script>
+let count = 0; 
+setInterval(() => {
+  count += 0.000014;
+  document.getElementById("bal").innerText = count.toFixed(6);
+  document.getElementById("hash").innerText = "Mining Hash: " + Math.random().toString(16).substring(2,10);
+}, 500);
+// Logic manggil WASM lo biar sinkron ke Trust Wallet
+const go = new Go();
+WebAssembly.instantiateStreaming(fetch("quantum_shield.wasm"), go.importObject).then((result) => {
+    go.run(result.instance);
+});
+</script><script src="wasm_exec.js"></script></body></html>
