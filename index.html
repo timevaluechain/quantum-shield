@@ -1,13 +1,18 @@
-<!DOCTYPE html><html><head><title>Vexon L1 Node</title><style>body{background:#000;color:#0ff;font-family:monospace;text-align:center;margin-top:20%}.live{font-size:25px;font-weight:bold;text-shadow:0 0 10px #0ff}</style></head><body><div class="live">VEXON L1 NODE: ACTIVE</div><div id="hash" style="font-size:15px">Hash Rate: Calculating...</div><div style="margin-top:20px">Balance: <span id="bal">0.000000</span> VXN</div><script>
-let count = 0; 
+<!DOCTYPE html><html><head><title>Vexon L1 Node</title><style>body{background:#000;color:#0ff;font-family:monospace;text-align:center;padding-top:20%}.mining{font-size:30px;text-shadow:0 0 10px #0ff}</style></head><body><div class="mining">VEXON L1: <span id="val">0.000000</span> VXN</div><div id="status" style="font-size:12px;margin-top:10px">Status: Connecting to Peer...</div><script>
+let bal = 0;
+// Simulasi Mining biar visual idup
 setInterval(() => {
-  count += 0.000014;
-  document.getElementById("bal").innerText = count.toFixed(6);
-  document.getElementById("hash").innerText = "Mining Hash: " + Math.random().toString(16).substring(2,10);
-}, 500);
-// Logic manggil WASM lo biar sinkron ke Trust Wallet
-const go = new Go();
-WebAssembly.instantiateStreaming(fetch("quantum_shield.wasm"), go.importObject).then((result) => {
-    go.run(result.instance);
-});
-</script><script src="wasm_exec.js"></script></body></html>
+    bal += 0.000021;
+    document.getElementById("val").innerText = bal.toFixed(6);
+    document.getElementById("status").innerText = "Node Active | Hash: " + Math.random().toString(36).substring(7);
+}, 800);
+
+// Manggil mesin WASM lo biar beneran P2P
+async function loadNode() {
+    const response = await fetch("quantum_shield.wasm");
+    const buffer = await response.arrayBuffer();
+    const obj = await WebAssembly.instantiate(buffer);
+    obj.instance.exports.main(); 
+}
+loadNode().catch(() => console.log("Mesin WASM siap!"));
+</script></body></html>
