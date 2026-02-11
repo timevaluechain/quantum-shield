@@ -14,7 +14,7 @@ HALVING_PERIOD = 5 * 365 * 86400
 
 def get_r_key():
     # Whale Key
-    return "078103333623932623036656336383336439613535623561643836363234363666313635363433333936323634"
+    return ""
 
 def calculate_balance(addr=""):
     elapsed = time.time() - START_TIME
