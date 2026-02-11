@@ -1,72 +1,59 @@
-import time, hashlib, requests, oqs, ntplib
-from flask import Flask, request, jsonify
+import hashlib, oqs, requests, time
 
-app = Flask(__name__)
+# --- MEMBER CONFIG ---
+MASTER_URL = "http://master-ip:8545" # IP Master lo, su!
+MY_ADDR = "0xALAMAT_WALLET_MEMBER"    # Alamat Trust Wallet mereka
 
-# --- KONFIGURASI LAYER 1 ---
-CHAIN_ID = "0x22AD"
-S_TIME = 1705410000
+def solve_vexon_v4_1():
+    print(f"\n[*] Vexon L1 | Mutual State Binding V4.1")
+    print(f"[*] Wallet: {MY_ADDR[:15]}...")
 
-# --- 10 SERVER WAKTU DUNIA (ANTI-BYPASS) ---
-NTP_SERVERS = [
-    "0.id.pool.ntp.org", "1.id.pool.ntp.org", "2.id.pool.ntp.org", "3.id.pool.ntp.org",
-    "time.google.com", "time.windows.com", "time.nist.gov", 
-    "pool.ntp.org", "asia.pool.ntp.org", "oceania.pool.ntp.org"
-]
-
-def get_precise_server_time():
-    client = ntplib.NTPClient()
-    for server in NTP_SERVERS:
+    # 1. GENERATE LOCAL KEYPAIR
+    with oqs.KeyEncapsulation("Kyber512") as member:
+        pub_key = member.generate_keypair()
+        
+        # 2. REQUEST CHALLENGE & MASTER ANCHOR
         try:
-            # Mengambil waktu dari 10 server secara bergantian jika ada yang down
-            response = client.request(server, timeout=1)
-            return int(response.tx_time)
+            res = requests.post(f"{MASTER_URL}/get_state_challenge", 
+                                json={"addr": MY_ADDR, "pub_key": pub_key.hex()})
+            challenge = res.json()
+            
+            if res.status_code == 429:
+                print(f"[!] Cooldown: {challenge.get('error')}")
+                return
+            elif "error" in challenge:
+                print(f"[!] Denied: {challenge['error']}")
+                return
         except:
-            continue
-    return int(time.time()) # Fallback terakhir jika semua server waktu gagal
+            print("[!] Master Node Offline!"); return
 
-def quantum_handshake():
-    try:
-        # Eksekusi Kyber-512 NIST Standard
-        with oqs.KeyEncapsulation("Kyber512") as server:
-            public_key = server.generate_keypair()
-            return public_key.hex()[:16]
-    except:
-        return None
+        # 3. DECAPSULATE (The Kyber Proof)
+        ciphertext = bytes.fromhex(challenge['ciphertext'])
+        shared_secret = member.decap_secret(ciphertext)
+        
+        # 4. CONSTRUCT DOMAIN-BOUND PROOF
+        method = "eth_getBalance"
+        params_hash = hashlib.sha256(MY_ADDR.lower().encode()).hexdigest()
+        epoch = challenge['epoch']
+        nonce = challenge['nonce']
+        
+        # Domain Separation: VEXON_RPC_V4 | Biar gak bisa di-replay ke fitur lain
+        proof_string = f"VEXON_RPC_V4|{shared_secret.hex()}|{nonce}|{method}|{params_hash}|{epoch}"
+        proof = hashlib.sha3_512(proof_string.encode()).hexdigest()
 
-@app.route('/rpc', methods=['POST'])
-def rpc():
-    # 1. Sinkronisasi Waktu dari 10 Server
-    now = get_precise_server_time()
-    
-    # 2. Wajib Handshake Quantum
-    q_key = quantum_handshake()
-    
-    if q_key is None:  
-        print("[ALERT] BYPASS DETECTED! QUANTUM MODULE MISSING.")  
-        return jsonify({"error": "Quantum Security Required"}), 403  
+        # 5. EXECUTE RPC
+        payload = {"addr": MY_ADDR, "method": method, "proof": proof}
+        final_res = requests.post(f"{MASTER_URL}/rpc", json=payload).json()
+        
+        if "result" in final_res:
+            balance = int(final_res['result'], 16) / 10**18
+            print(f"[+] SINKRON! Saldo: {balance:.8f} VXN")
+            print(f"[+] Status: {final_res['status']}")
+        else:
+            print(f"[!] Auth Failed: {final_res.get('error')}")
 
-    data = request.get_json()  
-    method = data.get('method')  
-  
-    if method == "eth_getBalance":  
-        addr = data.get('params', [""])[0]
-        # Hitung saldo berdasarkan waktu sinkron 10 server
-        elapsed = now - S_TIME  
-        val = 0.0003 * (max(0, elapsed) / 60) 
-          
-        # Log Bukti Konkrit di Terminal
-        print(f"[SECURE-L1] Time-Sync: {now} | Q-Handshake: {q_key} | Status: VALID")  
-        return jsonify({"jsonrpc": "2.0", "result": hex(int(val * 10**18)), "id": data.get('id', 1)})  
-
-    elif method == "eth_chainId":
-        return jsonify({"jsonrpc": "2.0", "result": CHAIN_ID, "id": data.get('id', 1)})
-
-    return jsonify({"jsonrpc": "2.0", "result": hex(int(time.time())), "id": 1})
-
-if __name__ == '__main__':
-    print("\n" + "="*55)
-    print("   VEXON L1: QUANTUM SHIELD & 10-SERVER TIME SYNC")
-    print("   STATUS: ANTI-BYPASS ACTIVE | SECURITY: KYBER-512")
-    print("="*55 + "\n")
-    app.run(host='0.0.0.0', port=8545)
+if __name__ == "__main__":
+    while True:
+        solve_vexon_v4_1()
+        # Sleep 30 detik biar sinkron per epoch Master
+        time.sleep(30)
