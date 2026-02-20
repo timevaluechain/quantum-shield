@@ -1,14 +1,7 @@
-
 #!/usr/bin/env python3
 """
 VEXON FINAL – Post-Quantum Layer 1 (Hash-Based)
-- Signature: WOTS+ sederhana (SHA256) – quantum-resistant
-- Wallet: encrypted dengan scrypt + AES (cryptography)
-- Fork resolution via orphan pool
-- Checkpoint setiap 100 block
-- Mempool prioritas fee
-- PoW, difficulty adjustment, timestamp validation
-- P2P broadcast, API Flask
+Dilengkapi: data transaksi, nonce, history, mempool, get_tx.
 """
 
 import hashlib, json, time, os, asyncio, secrets, threading, requests, sys
@@ -32,7 +25,6 @@ MAX_FUTURE_BLOCK_TIME = 2 * 3600
 MAX_PAST_BLOCK_TIME = 24 * 3600
 
 # ==================== POST-QUANTUM SIGNATURE (HASH-BASED) ====================
-# Implementasi WOTS+ sederhana dengan SHA256 – quantum-resistant
 class QuantumSign:
     @staticmethod
     def keygen():
@@ -43,7 +35,7 @@ class QuantumSign:
     @staticmethod
     def sign(private, message):
         h = message
-        for _ in range(16):   # W=16, chain length
+        for _ in range(16):
             h = hashlib.sha256(private + h).digest()
         return h
 
@@ -85,14 +77,15 @@ class Wallet:
         private, public_hex = decrypted.split(b"||", 1)
         return private, public_hex.decode()
 
-# ==================== TRANSACTION ====================
+# ==================== TRANSACTION (DENGAN FIELD DATA) ====================
 class Tx:
-    def __init__(self, from_addr, to_addr, amount, nonce, fee=0):
-        self.from_addr = from_addr      # hex public key
+    def __init__(self, from_addr, to_addr, amount, nonce, fee=0, data=None):
+        self.from_addr = from_addr
         self.to_addr = to_addr
         self.amount = amount
         self.nonce = nonce
         self.fee = fee
+        self.data = data
         self.sig = None
 
     def serialize(self):
@@ -101,8 +94,10 @@ class Tx:
             'to': self.to_addr,
             'amount': self.amount,
             'nonce': self.nonce,
-            'fee': self.fee
+            'fee': self.fee,
         }
+        if self.data is not None:
+            data['data'] = self.data
         return json.dumps(data, sort_keys=True).encode()
 
     def hash(self):
@@ -244,8 +239,8 @@ class Blockchain:
         self.difficulty = genesis_block.difficulty
         self.mempool = []
         self.total_work = genesis_block.work
-        self.checkpoints = {}                  # height -> block hash
-        self.orphan_blocks = {}                # prev_hash -> list of Block
+        self.checkpoints = {}
+        self.orphan_blocks = {}
         self._add_checkpoint(genesis_block)
 
     def _add_checkpoint(self, block):
@@ -293,7 +288,8 @@ class Blockchain:
                     'amount': tx.amount,
                     'nonce': tx.nonce,
                     'fee': tx.fee,
-                    'sig': tx.sig
+                    'sig': tx.sig,
+                    'data': tx.data
                 }
                 block_data['txs'].append(tx_data)
             data.append(block_data)
@@ -313,7 +309,14 @@ class Blockchain:
         for block_data in data:
             txs = []
             for tx_data in block_data['txs']:
-                tx = Tx(tx_data['from'], tx_data['to'], tx_data['amount'], tx_data['nonce'], tx_data.get('fee', 0))
+                tx = Tx(
+                    from_addr=tx_data['from'],
+                    to_addr=tx_data['to'],
+                    amount=tx_data['amount'],
+                    nonce=tx_data['nonce'],
+                    fee=tx_data.get('fee', 0),
+                    data=tx_data.get('data')
+                )
                 tx.sig = tx_data['sig']
                 txs.append(tx)
             block = Block(
@@ -354,7 +357,6 @@ class Blockchain:
         while True:
             tip_hash = self.tip.hash
             if tip_hash in self.orphan_blocks:
-                # Cari orphan dengan index tepat
                 found = None
                 for b in self.orphan_blocks[tip_hash]:
                     if b.index == self.tip.index + 1:
@@ -374,10 +376,7 @@ class Blockchain:
                         if not self.orphan_blocks[tip_hash]:
                             del self.orphan_blocks[tip_hash]
                         connected += 1
-                        continue   # lanjut loop untuk orphan berikutnya
-                    else:
-                        # orphan tidak valid, hapus? Tidak, biarkan (mungkin nanti valid setelah reorg)
-                        pass
+                        continue
                 break
             else:
                 break
@@ -395,14 +394,11 @@ class Blockchain:
             self.difficulty = max(1, self.difficulty - 1)
 
     def receive_block(self, block):
-        # Cek duplikat
         for b in self.chain:
             if b.hash == block.hash:
                 return False, "Block already in chain"
-        # Cek checkpoint
         if block.index in self.checkpoints and self.checkpoints[block.index] != block.hash:
             return False, "Checkpoint violation"
-        # Jika block langsung extend tip
         if block.prev_hash == self.tip.hash:
             exp_reward = self.get_expected_reward(block.index)
             valid, msg = block.validate(self.tip, self.state, exp_reward)
@@ -418,7 +414,6 @@ class Blockchain:
             else:
                 return False, msg
         else:
-            # Simpan sebagai orphan
             self.add_orphan(block)
             return True, "Block stored as orphan"
 
@@ -428,7 +423,6 @@ class Blockchain:
     def mine_block(self, miner_addr, private_key):
         reward = self.get_expected_reward(len(self.chain))
         coinbase = self.create_coinbase_tx(miner_addr, reward)
-        # Urutkan mempool berdasarkan fee
         self.mempool.sort(key=lambda tx: tx.fee, reverse=True)
         txs = [coinbase] + self.mempool[:5]
         block = Block(len(self.chain), self.tip.hash, txs, int(time.time()), self.difficulty)
@@ -442,7 +436,6 @@ class Blockchain:
             self.total_work += block.work
             self._add_checkpoint(block)
             self.adjust_difficulty()
-            # Hapus tx yang sudah masuk dari mempool
             self.mempool = [tx for tx in self.mempool if tx not in txs[1:]]
             return block
         else:
@@ -453,6 +446,15 @@ app = Flask(__name__)
 blockchain = None
 miner_addr = None
 miner_private = None
+
+# =============== ROUTE EXPLORER DI ROOT ================
+@app.route('/')
+def serve_explorer():
+    try:
+        with open('explorer.html', 'r') as f:
+            return f.read()
+    except FileNotFoundError:
+        return "File explorer.html tidak ditemukan. Buat file tersebut.", 404
 
 @app.route('/get_chain')
 def get_chain():
@@ -472,11 +474,77 @@ def get_balance(address):
     bal = blockchain.state.get_balance(address) / DECIMALS
     return jsonify({"address": address, "balance": bal})
 
+@app.route('/nonce/<address>')
+def get_nonce(address):
+    nonce = blockchain.state.get_nonce(address)
+    return jsonify({"address": address, "nonce": nonce})
+
+@app.route('/txs/<address>')
+def get_transactions(address):
+    txs = []
+    for block in blockchain.chain:
+        for tx in block.txs:
+            if tx.from_addr == address or tx.to_addr == address:
+                txs.append({
+                    'hash': tx.hash().hex(),
+                    'from': tx.from_addr,
+                    'to': tx.to_addr,
+                    'amount': tx.amount,
+                    'nonce': tx.nonce,
+                    'fee': tx.fee,
+                    'data': tx.data,
+                    'block': block.index
+                })
+    return jsonify(txs)
+
+@app.route('/mempool')
+def get_mempool():
+    txs = []
+    for tx in blockchain.mempool:
+        txs.append({
+            'hash': tx.hash().hex(),
+            'from': tx.from_addr,
+            'to': tx.to_addr,
+            'amount': tx.amount,
+            'nonce': tx.nonce,
+            'fee': tx.fee,
+            'data': tx.data
+        })
+    return jsonify(txs)
+
+@app.route('/get_tx/<tx_hash>')
+def get_tx(tx_hash):
+    for block in blockchain.chain:
+        for tx in block.txs:
+            if tx.hash().hex() == tx_hash:
+                return jsonify({
+                    'from': tx.from_addr,
+                    'to': tx.to_addr,
+                    'amount': tx.amount,
+                    'nonce': tx.nonce,
+                    'fee': tx.fee,
+                    'data': tx.data,
+                    'sig': tx.sig,
+                    'block': block.index,
+                    'hash': tx_hash
+                })
+    return jsonify({'error': 'Transaction not found'}), 404
+
 @app.route('/send_tx', methods=['POST'])
 def send_tx():
     data = request.json
     try:
-        tx = Tx(data['from'], data['to'], data['amount'], data['nonce'], data.get('fee', 0))
+        if data.get('data') and len(json.dumps(data['data'])) > 10000:
+            return "Data too large (max 10KB)", 400
+
+        tx = Tx(
+            from_addr=data['from'],
+            to_addr=data['to'],
+            amount=data['amount'],
+            nonce=data['nonce'],
+            fee=data.get('fee', 0),
+            data=data.get('data')
+        )
         tx.sig = data['sig']
         if not tx.verify():
             return "Invalid signature", 400
@@ -495,7 +563,14 @@ def receive():
     try:
         txs = []
         for txdata in data['txs']:
-            tx = Tx(txdata['from'], txdata['to'], txdata['amount'], txdata['nonce'], txdata.get('fee', 0))
+            tx = Tx(
+                from_addr=txdata['from'],
+                to_addr=txdata['to'],
+                amount=txdata['amount'],
+                nonce=txdata['nonce'],
+                fee=txdata.get('fee', 0),
+                data=txdata.get('data')
+            )
             tx.sig = txdata['sig']
             txs.append(tx)
         block = Block(data['index'], data['prev'], txs, data['ts'], data['diff'], data['nonce'])
@@ -538,7 +613,8 @@ def broadcast_block(block):
             'amount': tx.amount,
             'nonce': tx.nonce,
             'fee': tx.fee,
-            'sig': tx.sig
+            'sig': tx.sig,
+            'data': tx.data
         } for tx in block.txs]
     }
     for peer in list(PEERS):
@@ -549,7 +625,6 @@ def broadcast_block(block):
 
 # ==================== MAIN ====================
 if __name__ == '__main__':
-    # Inisialisasi wallet
     if os.path.exists(WALLET_FILE):
         pw = input("Enter wallet password: ")
         miner_private, miner_addr = Wallet.load(pw)
@@ -560,7 +635,6 @@ if __name__ == '__main__':
         Wallet.save(miner_private, miner_addr, pw)
         print(f"New wallet created. Address: {miner_addr}")
 
-    # Load atau buat blockchain
     if os.path.exists(CHAIN_FILE):
         blockchain = Blockchain.load(CHAIN_FILE, miner_addr)
         print(f"Blockchain loaded. Height: {len(blockchain.chain)-1}")
@@ -569,10 +643,8 @@ if __name__ == '__main__':
         blockchain.save()
         print("Genesis block created.")
 
-    # Jalankan API
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8545
     threading.Thread(target=lambda: app.run(host='0.0.0.0', port=port, debug=False), daemon=True).start()
     print(f"API running on port {port}")
 
-    # Mulai mining
     asyncio.run(mining_loop())
