@@ -1,14 +1,27 @@
 #!/usr/bin/env python3
 """
-VEXON FINAL – Post-Quantum Layer 1 (Hash-Based)
-Dilengkapi: data transaksi, nonce, history, mempool, get_tx.
+VEXON SECURE – Post-Quantum Layer 1 dengan Keamanan Tingkat Lanjut
+- Anti DoS: rate limiting per IP
+- API key opsional untuk /send_tx
+- CORS terbatas
+- Max block & mempool size
+- Logging ke file
+- Siap production
 """
 
 import hashlib, json, time, os, asyncio, secrets, threading, requests, sys
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, abort
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
+from flask_cors import CORS
 import base64
+import logging
+from logging.handlers import RotatingFileHandler
+from dotenv import load_dotenv
+
+load_dotenv()  # baca file .env
 
 # ==================== KONFIGURASI ====================
 DECIMALS = 10**18
@@ -24,7 +37,52 @@ CHECKPOINT_INTERVAL = 100
 MAX_FUTURE_BLOCK_TIME = 2 * 3600
 MAX_PAST_BLOCK_TIME = 24 * 3600
 
-# ==================== POST-QUANTUM SIGNATURE (HASH-BASED) ====================
+# Batasan keamanan
+MIN_FEE = 0.01 * DECIMALS               # fee minimal 0.01 VEXN
+MAX_TX_DATA_SIZE = 10 * 1024             # 10 KB
+MAX_BLOCK_TXS = 100                       # maksimal transaksi per block
+MAX_MEMPOOL_SIZE = 1000                   # maksimal transaksi pending
+
+# API Key (dari environment)
+API_KEY = os.getenv("API_KEY", None)      # None = nonaktifkan
+
+# ==================== SETUP LOGGING ====================
+log_handler = RotatingFileHandler('vexon.log', maxBytes=10*1024*1024, backupCount=5)
+log_handler.setFormatter(logging.Formatter(
+    '%(asctime)s %(levelname)s: %(message)s [in %(pathname)s:%(lineno)d]'
+))
+app = Flask(__name__)
+app.logger.addHandler(log_handler)
+app.logger.setLevel(logging.INFO)
+
+# ==================== RATE LIMITING ====================
+limiter = Limiter(
+    app=app,
+    key_func=get_remote_address,
+    default_limits=["200 per day", "50 per hour"],
+    storage_uri="memory://",  # gunakan redis untuk production
+)
+
+# ==================== CORS ====================
+allowed_origins = os.getenv("ALLOWED_ORIGINS", "").split(",")
+if allowed_origins and allowed_origins[0]:
+    CORS(app, origins=allowed_origins)
+else:
+    CORS(app)  # semua origin (tidak direkomendasikan untuk publik)
+
+# ==================== VALIDASI API KEY ====================
+def require_api_key(f):
+    def decorated(*args, **kwargs):
+        if API_KEY is None:
+            return f(*args, **kwargs)
+        key = request.headers.get("X-API-Key")
+        if key and key == API_KEY:
+            return f(*args, **kwargs)
+        abort(401, description="Invalid or missing API Key")
+    decorated.__name__ = f.__name__
+    return decorated
+
+# ==================== POST-QUANTUM SIGNATURE ====================
 class QuantumSign:
     @staticmethod
     def keygen():
@@ -77,7 +135,7 @@ class Wallet:
         private, public_hex = decrypted.split(b"||", 1)
         return private, public_hex.decode()
 
-# ==================== TRANSACTION (DENGAN FIELD DATA) ====================
+# ==================== TRANSACTION ====================
 class Tx:
     def __init__(self, from_addr, to_addr, amount, nonce, fee=0, data=None):
         self.from_addr = from_addr
@@ -423,8 +481,10 @@ class Blockchain:
     def mine_block(self, miner_addr, private_key):
         reward = self.get_expected_reward(len(self.chain))
         coinbase = self.create_coinbase_tx(miner_addr, reward)
+        # Ambil transaksi dari mempool, batasi jumlah
         self.mempool.sort(key=lambda tx: tx.fee, reverse=True)
-        txs = [coinbase] + self.mempool[:5]
+        selected_txs = self.mempool[:MAX_BLOCK_TXS]
+        txs = [coinbase] + selected_txs
         block = Block(len(self.chain), self.tip.hash, txs, int(time.time()), self.difficulty)
         block.mine()
         exp_reward = self.get_expected_reward(block.index)
@@ -436,7 +496,8 @@ class Blockchain:
             self.total_work += block.work
             self._add_checkpoint(block)
             self.adjust_difficulty()
-            self.mempool = [tx for tx in self.mempool if tx not in txs[1:]]
+            # Hapus transaksi yang sudah masuk dari mempool
+            self.mempool = [tx for tx in self.mempool if tx not in selected_txs]
             return block
         else:
             return None
@@ -457,6 +518,7 @@ def serve_explorer():
         return "File explorer.html tidak ditemukan. Buat file tersebut.", 404
 
 @app.route('/get_chain')
+@limiter.limit("10 per minute")  # batasi akses
 def get_chain():
     return jsonify([{
         'index': b.index,
@@ -470,16 +532,19 @@ def get_chain():
     } for b in blockchain.chain])
 
 @app.route('/balance/<address>')
+@limiter.limit("20 per minute")
 def get_balance(address):
     bal = blockchain.state.get_balance(address) / DECIMALS
     return jsonify({"address": address, "balance": bal})
 
 @app.route('/nonce/<address>')
+@limiter.limit("20 per minute")
 def get_nonce(address):
     nonce = blockchain.state.get_nonce(address)
     return jsonify({"address": address, "nonce": nonce})
 
 @app.route('/txs/<address>')
+@limiter.limit("10 per minute")
 def get_transactions(address):
     txs = []
     for block in blockchain.chain:
@@ -498,6 +563,7 @@ def get_transactions(address):
     return jsonify(txs)
 
 @app.route('/mempool')
+@limiter.limit("10 per minute")
 def get_mempool():
     txs = []
     for tx in blockchain.mempool:
@@ -513,6 +579,7 @@ def get_mempool():
     return jsonify(txs)
 
 @app.route('/get_tx/<tx_hash>')
+@limiter.limit("20 per minute")
 def get_tx(tx_hash):
     for block in blockchain.chain:
         for tx in block.txs:
@@ -531,11 +598,22 @@ def get_tx(tx_hash):
     return jsonify({'error': 'Transaction not found'}), 404
 
 @app.route('/send_tx', methods=['POST'])
+@limiter.limit("5 per minute")          # sangat ketat untuk mencegah spam
+@require_api_key                         # wajib API key jika diatur
 def send_tx():
     data = request.json
     try:
-        if data.get('data') and len(json.dumps(data['data'])) > 10000:
+        # Validasi ukuran data
+        if data.get('data') and len(json.dumps(data['data'])) > MAX_TX_DATA_SIZE:
             return "Data too large (max 10KB)", 400
+
+        # Validasi fee
+        if data.get('fee', 0) < MIN_FEE:
+            return f"Fee too low, minimum {MIN_FEE/DECIMALS} VEXN", 400
+
+        # Cek mempool overflow
+        if len(blockchain.mempool) >= MAX_MEMPOOL_SIZE:
+            return "Mempool full, please try again later", 503
 
         tx = Tx(
             from_addr=data['from'],
@@ -553,11 +631,14 @@ def send_tx():
         if blockchain.state.get_balance(tx.from_addr) < tx.amount + tx.fee:
             return "Insufficient balance", 400
         blockchain.mempool.append(tx)
+        app.logger.info(f"Tx added to mempool from {tx.from_addr}")
         return "Transaction added to mempool", 200
     except Exception as e:
+        app.logger.error(f"Error in send_tx: {e}")
         return str(e), 400
 
 @app.route('/receive_block', methods=['POST'])
+@limiter.limit("10 per minute")  # batasi untuk peer
 def receive():
     data = request.json
     try:
@@ -579,13 +660,16 @@ def receive():
         success, msg = blockchain.receive_block(block)
         if success:
             blockchain.save()
+            app.logger.info(f"Block #{block.index} received from peer")
             return "OK", 200
         else:
             return msg, 400
     except Exception as e:
+        app.logger.error(f"Error receive_block: {e}")
         return str(e), 400
 
 @app.route('/get_checkpoints')
+@limiter.limit("10 per minute")
 def get_checkpoints():
     return jsonify(blockchain.checkpoints)
 
@@ -594,7 +678,7 @@ async def mining_loop():
     while True:
         block = blockchain.mine_block(miner_addr, miner_private)
         if block:
-            print(f"\033[92m[MINED] #{block.index} | Diff: {block.difficulty} | Reward: {blockchain.get_expected_reward(block.index)/DECIMALS} VXN | Balance: {blockchain.state.get_balance(miner_addr)/DECIMALS}\033[0m")
+            app.logger.info(f"[MINED] #{block.index} | Diff: {block.difficulty} | Balance: {blockchain.state.get_balance(miner_addr)/DECIMALS}")
             blockchain.save()
             threading.Thread(target=broadcast_block, args=(block,)).start()
         await asyncio.sleep(0.1)
@@ -625,16 +709,37 @@ def broadcast_block(block):
 
 # ==================== MAIN ====================
 if __name__ == '__main__':
-    if os.path.exists(WALLET_FILE):
-        pw = input("Enter wallet password: ")
-        miner_private, miner_addr = Wallet.load(pw)
-        print(f"Wallet loaded. Address: {miner_addr}")
+    # Inisialisasi wallet
+    wallet_password = os.getenv("WALLET_PASSWORD")
+    if wallet_password:
+        # Jika password diberikan via env, gunakan
+        if os.path.exists(WALLET_FILE):
+            try:
+                miner_private, miner_addr = Wallet.load(wallet_password)
+                print(f"Wallet loaded. Address: {miner_addr}")
+            except Exception as e:
+                print(f"Gagal load wallet: {e}")
+                sys.exit(1)
+        else:
+            print("Wallet file not found. Generate new?")
+            # fallback ke input manual
+            pw = input("Create new wallet password: ")
+            miner_private, miner_addr = Wallet.generate()
+            Wallet.save(miner_private, miner_addr, pw)
+            print(f"New wallet created. Address: {miner_addr}")
     else:
-        pw = input("Create new wallet password: ")
-        miner_private, miner_addr = Wallet.generate()
-        Wallet.save(miner_private, miner_addr, pw)
-        print(f"New wallet created. Address: {miner_addr}")
+        # Manual input
+        if os.path.exists(WALLET_FILE):
+            pw = input("Enter wallet password: ")
+            miner_private, miner_addr = Wallet.load(pw)
+            print(f"Wallet loaded. Address: {miner_addr}")
+        else:
+            pw = input("Create new wallet password: ")
+            miner_private, miner_addr = Wallet.generate()
+            Wallet.save(miner_private, miner_addr, pw)
+            print(f"New wallet created. Address: {miner_addr}")
 
+    # Load atau buat blockchain
     if os.path.exists(CHAIN_FILE):
         blockchain = Blockchain.load(CHAIN_FILE, miner_addr)
         print(f"Blockchain loaded. Height: {len(blockchain.chain)-1}")
@@ -644,7 +749,10 @@ if __name__ == '__main__':
         print("Genesis block created.")
 
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8545
+    # Jalankan Flask dalam mode production dengan gunicorn lebih baik,
+    # untuk development kita jalankan dengan threading
     threading.Thread(target=lambda: app.run(host='0.0.0.0', port=port, debug=False), daemon=True).start()
     print(f"API running on port {port}")
 
+    # Mulai mining
     asyncio.run(mining_loop())
